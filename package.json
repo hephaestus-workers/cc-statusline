@@ -1,0 +1,27 @@
+{
+  "name": "@hephaestus-workers/cc-statusline",
+  "version": "1.0.0",
+  "description": "Claude Code statusline with multi-account display support (fork of kamranahmedse/claude-statusline)",
+  "bin": {
+    "cc-statusline": "bin/install.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hephaestus-workers/cc-statusline.git"
+  },
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "claude"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

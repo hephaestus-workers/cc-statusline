@@ -2,3 +2,4 @@ node_modules/
 *.tgz
 cc-statusline-implementation-guide.md
 CLAUDE.md
+image*.png

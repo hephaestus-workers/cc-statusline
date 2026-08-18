@@ -1,6 +1,10 @@
 #!/bin/bash
 set -f
 
+# Replaced with the package version when the installer copies this file. A copy
+# run straight from the repository keeps the placeholder and never self-updates.
+installed_version="__CC_STATUSLINE_VERSION__"
+
 # Force a consistent locale so date/printf output looks the same everywhere
 # (e.g. "2:00pm" instead of localized AM/PM markers)
 export LC_ALL=C
@@ -341,6 +345,81 @@ if $needs_refresh; then
     fi
 fi
 
+
+# ── Self-update check (background, about once a day) ────
+# Claude Code runs ~/.claude/statusline.sh, a copy taken at install time, so a
+# new release never reaches an existing install on its own. Ask the npm
+# registry roughly once a day and let the installer swap this file out. The
+# installer renames the new file into place, so a run already in flight keeps
+# reading the copy it started with. Set CC_STATUSLINE_NO_SELF_UPDATE=1 to
+# turn this off.
+update_stamp="$cache_dir/last-update-check"
+update_lock="$cache_dir/update-lock"
+update_interval=86400   # once a day is plenty for a status line
+update_lock_max_age=900 # npx can be slow; only assume abandonment after this
+
+# An unstamped copy (running from a checkout) or a botched substitution must
+# never trigger an update, so require something that looks like a version
+case "$installed_version" in
+    [0-9]*.[0-9]*.[0-9]*) : ;;
+    *) installed_version="" ;;
+esac
+
+# True when $1 is a higher version than $2. Compares each dotted field as a
+# number so 1.10.0 beats 1.9.0, and only ever moves forward: an install that
+# is somehow ahead of the registry is left alone rather than downgraded.
+version_gt() {
+    local a="$1" b="$2" ai bi
+    [ "$a" = "$b" ] && return 1
+    while [ -n "$a" ] || [ -n "$b" ]; do
+        ai=${a%%.*}; bi=${b%%.*}
+        ai=${ai%%[!0-9]*}; bi=${bi%%[!0-9]*}
+        [ -z "$ai" ] && ai=0
+        [ -z "$bi" ] && bi=0
+        [ "$ai" -gt "$bi" ] 2>/dev/null && return 0
+        [ "$ai" -lt "$bi" ] 2>/dev/null && return 1
+        case "$a" in *.*) a=${a#*.} ;; *) a="" ;; esac
+        case "$b" in *.*) b=${b#*.} ;; *) b="" ;; esac
+    done
+    return 1
+}
+
+if [ -n "$installed_version" ] && [ "$CC_STATUSLINE_NO_SELF_UPDATE" != "1" ] \
+   && command -v npx >/dev/null 2>&1; then
+    update_due=true
+    if [ -f "$update_stamp" ]; then
+        file_age "$update_stamp" && [ "$_file_age" -lt "$update_interval" ] && update_due=false
+    fi
+    if $update_due; then
+        if [ -d "$update_lock" ]; then
+            file_age "$update_lock" && [ "$_file_age" -ge "$update_lock_max_age" ] && rmdir "$update_lock" 2>/dev/null
+        fi
+        if mkdir "$update_lock" 2>/dev/null; then
+            (
+                trap '' HUP
+                # Stamp first: a failed check should still wait a day, not
+                # retry on every render
+                : > "$update_stamp"
+                latest=$(curl -s --max-time 10 \
+                    "https://registry.npmjs.org/@hephaestus-workers%2Fcc-statusline/latest" \
+                    2>/dev/null | jq -r '.version // empty' 2>/dev/null)
+                latest=${latest//$'\r'/}
+                if [ -n "$latest" ] && version_gt "$latest" "$installed_version"; then
+                    # npx resolves against the current directory's package.json,
+                    # and inside a checkout of this project that makes it skip
+                    # the download entirely, so run it somewhere neutral
+                    cd "$HOME" 2>/dev/null || cd / 2>/dev/null
+                    if command -v timeout >/dev/null 2>&1; then
+                        timeout 300 npx -y "@hephaestus-workers/cc-statusline@$latest"
+                    else
+                        npx -y "@hephaestus-workers/cc-statusline@$latest"
+                    fi
+                fi
+                rmdir "$update_lock" 2>/dev/null
+            ) </dev/null >/dev/null 2>&1 &
+        fi
+    fi
+fi
 # One jq pass over the snapshot, emitting tab-separated records:
 #   extra   <is_enabled>
 #   window  five|seven      <percent>  <resets_at>

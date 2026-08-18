@@ -22,16 +22,27 @@ Then restart Claude Code.
 
 ## Update
 
-Installing copies the script to `~/.claude/statusline.sh`, and Claude Code runs that copy — so a
-new release does **not** reach an existing install on its own. To upgrade, run the installer again:
+From v1.2.0 the statusline **keeps itself up to date**. About once a day it asks the npm registry
+for the latest version in the background, and if there is a newer one it re-runs the installer. It
+only ever moves forward — an install ahead of the registry is left alone — and the check runs
+detached from rendering, so it never delays the statusline. The new file is swapped in with
+`rename()`, so a statusline run already in flight finishes against the copy it started with.
+
+To turn it off, set `CC_STATUSLINE_NO_SELF_UPDATE=1` in your environment.
+
+Upgrading keeps the backup taken at first install, so `--uninstall` still restores whatever
+statusline you had before cc-statusline.
+
+Two cases still need a manual run:
 
 ```bash
 npx @hephaestus-workers/cc-statusline@latest
 ```
 
-The `@latest` matters: without it `npx` may reuse an older copy from its own cache. Upgrading keeps
-the backup taken at first install, so `--uninstall` still restores whatever statusline you had
-before cc-statusline.
+- **Coming from v1.1.0 or earlier**, which has no self-update code — one manual run bootstraps it.
+- **You want the update now** rather than within a day.
+
+The `@latest` matters: without it `npx` may reuse an older copy from its own cache.
 
 ## Uninstall
 
@@ -80,6 +91,7 @@ minutes rather than retrying on every render.
 
 - **Account segment**: shows the currently logged-in Claude account (main feature of this fork).
 - **Per-model weekly limits**: a line under `weekly` for model-scoped allowances such as Fable.
+- **Self-updating**: a daily background check keeps the installed copy current (`CC_STATUSLINE_NO_SELF_UPDATE=1` opts out).
 - **`CLAUDE_CONFIG_DIR` aware**: settings, credentials, and usage cache follow the active config directory.
 - **Token hygiene**: the OAuth token is passed to `curl` via stdin (`-H @-`) instead of a command-line argument, so it never appears in the process list (upstream [issue #29](https://github.com/kamranahmedse/claude-statusline/issues/29)).
 - **Per-user cache**: usage cache moved from the shared `/tmp` to `~/.cache/cc-statusline/`, one file per config dir.

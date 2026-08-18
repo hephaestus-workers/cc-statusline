@@ -229,94 +229,203 @@ if [ -n "$stdin_five_pct" ]; then
     seven_day_reset_epoch=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 fi
 
-# ── Fallback: API call (cached) ────────────────────────
+# ── Usage API snapshot (cached) ────────────────────────
+# The status line stdin JSON only carries five_hour / seven_day. Model-scoped
+# weekly limits (Fable etc.) and extra usage exist only in the OAuth usage
+# API, so the snapshot is kept fresh even when stdin already has rate limits.
 # Per-user cache dir (not the shared /tmp), and one cache file per config
 # dir so multiple accounts don't overwrite each other's usage data
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/cc-statusline"
 cache_key=$(printf '%s' "$account_config_dir" | cksum 2>/dev/null | cut -d' ' -f1)
 [ -z "$cache_key" ] && cache_key="default"
 cache_file="$cache_dir/usage-cache-${cache_key}.json"
-cache_max_age=60
+fail_file="$cache_dir/usage-fail-${cache_key}"
+lock_dir="$cache_dir/usage-lock-${cache_key}"
+cache_max_age=60    # refresh the snapshot at most once a minute
+fail_max_age=300    # back off this long after a failed fetch
+lock_max_age=30     # a lock older than this is treated as abandoned
 mkdir -p "$cache_dir" 2>/dev/null
+
+now_ts=$(date +%s)
+
+# Sets $_file_age rather than echoing it, to save a subshell per call
+file_age() {
+    local mtime
+    _file_age=""
+    mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+    [ -z "$mtime" ] && return 1
+    _file_age=$(( now_ts - mtime ))
+    return 0
+}
+
+read_oauth_token() {
+    local token="" blob="" creds_file
+    if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+        printf '%s' "$CLAUDE_CODE_OAUTH_TOKEN"
+        return 0
+    fi
+    if command -v security >/dev/null 2>&1; then
+        blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+        [ -n "$blob" ] && token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+    fi
+    if [ -z "$token" ] || [ "$token" = "null" ]; then
+        creds_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+        [ -f "$creds_file" ] && token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+    fi
+    if [ -z "$token" ] || [ "$token" = "null" ]; then
+        if command -v secret-tool >/dev/null 2>&1; then
+            blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+            [ -n "$blob" ] && token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+        fi
+    fi
+    [ "$token" = "null" ] && token=""
+    printf '%s' "$token"
+}
+
+refresh_usage_cache() {
+    local token response
+    token=$(read_oauth_token)
+    [ -z "$token" ] && { : > "$fail_file" 2>/dev/null; return 1; }
+    # The Authorization header is fed via stdin (-H @-) so the token
+    # never appears in the process list (upstream issue #29)
+    response=$(printf 'Authorization: Bearer %s\n' "$token" | curl -s --max-time 5 \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H @- \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "User-Agent: claude-code/2.1.34" \
+        "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+    if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+        printf '%s' "$response" > "$cache_file"
+        rm -f "$fail_file" 2>/dev/null
+        return 0
+    fi
+    : > "$fail_file" 2>/dev/null
+    return 1
+}
 
 usage_data=""
 extra_enabled="false"
 
-if ! $has_stdin_rates; then
-    needs_refresh=true
+cache_age=""
+if [ -f "$cache_file" ]; then
+    usage_data=$(cat "$cache_file" 2>/dev/null)
+    file_age "$cache_file" && cache_age=$_file_age
+fi
 
-    if [ -f "$cache_file" ]; then
-        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
-        now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        if [ "$cache_age" -lt "$cache_max_age" ]; then
-            needs_refresh=false
-            usage_data=$(cat "$cache_file" 2>/dev/null)
+needs_refresh=true
+[ -n "$cache_age" ] && [ "$cache_age" -lt "$cache_max_age" ] && needs_refresh=false
+if $needs_refresh && [ -f "$fail_file" ]; then
+    file_age "$fail_file" && [ "$_file_age" -lt "$fail_max_age" ] && needs_refresh=false
+fi
+
+if $needs_refresh; then
+    # A status line run that Claude Code cancelled mid-fetch can leave the
+    # lock behind, so drop it once it is clearly too old to be live
+    if [ -d "$lock_dir" ]; then
+        file_age "$lock_dir" && [ "$_file_age" -ge "$lock_max_age" ] && rmdir "$lock_dir" 2>/dev/null
+    fi
+    if mkdir "$lock_dir" 2>/dev/null; then
+        if [ -z "$usage_data" ]; then
+            # Nothing cached yet: fetch inline so the first render has data
+            refresh_usage_cache && usage_data=$(cat "$cache_file" 2>/dev/null)
+            rmdir "$lock_dir" 2>/dev/null
+        else
+            # Refresh in the background and render the cached snapshot now.
+            # Claude Code cancels a status line script that is still running
+            # when the next update fires, so a blocking fetch would often
+            # never finish. stdio is detached so this run can exit at once.
+            ( trap '' HUP; refresh_usage_cache; rmdir "$lock_dir" 2>/dev/null ) \
+                </dev/null >/dev/null 2>&1 &
         fi
     fi
+fi
 
-    if $needs_refresh; then
-        token=""
-        if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            token="$CLAUDE_CODE_OAUTH_TOKEN"
-        elif command -v security >/dev/null 2>&1; then
-            blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-            if [ -n "$blob" ]; then
-                token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-            fi
-        fi
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-            creds_file="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
-            if [ -f "$creds_file" ]; then
-                token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-            fi
-        fi
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-            if command -v secret-tool >/dev/null 2>&1; then
-                blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-                if [ -n "$blob" ]; then
-                    token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
-                fi
-            fi
-        fi
+# One jq pass over the snapshot, emitting tab-separated records:
+#   extra   <is_enabled>
+#   window  five|seven      <percent>  <resets_at>
+#   scoped  <padded label>  <percent>  <resets_at>
+# No output at all means the snapshot is missing or unusable.
+#
+# Model-scoped weekly limits (Fable etc.) never appear on stdin. The usage API
+# reports them as limits[] entries with kind="weekly_scoped" and a
+# scope.model.display_name; older shapes of the same response used
+# seven_day_opus / seven_day_sonnet. The label comes from whatever the API
+# reports, so a renamed or additional scoped model needs no code change.
+usage_summary=""
+if [ -n "$usage_data" ]; then
+    usage_summary=$(printf '%s' "$usage_data" | jq -r '
+        def as_pct: (. // 0) | round | tostring;
+        def scoped_limits:
+            ([ (.limits // [])[]
+               | select(.kind == "weekly_scoped")
+               | select((.scope.model.display_name // "") != "")
+               | { name: .scope.model.display_name,
+                   pct: (.percent // 0),
+                   reset: (.resets_at // "") } ]) as $scoped
+            | if ($scoped | length) > 0 then $scoped
+              else
+                [ { name: "opus",   w: .seven_day_opus },
+                  { name: "sonnet", w: .seven_day_sonnet } ]
+                | map(select(.w != null)
+                      | { name: .name,
+                          pct: (.w.utilization // 0),
+                          reset: (.w.resets_at // "") })
+              end;
+        [ "extra",  ((.extra_usage.is_enabled // false) | tostring) ],
+        [ "window", "five",  (.five_hour.utilization  | as_pct), (.five_hour.resets_at  // "") ],
+        [ "window", "seven", (.seven_day.utilization  | as_pct), (.seven_day.resets_at // "") ],
+        ( scoped_limits[]
+          | [ "scoped",
+              (((.name | ascii_downcase) + "       ")[0:7]),
+              (.pct | as_pct),
+              .reset ] )
+        | @tsv
+    ' 2>/dev/null)
+    # The Windows build of jq terminates lines with CRLF
+    usage_summary=${usage_summary//$'\r'/}
+fi
 
-        if [ -n "$token" ] && [ "$token" != "null" ]; then
-            # The Authorization header is fed via stdin (-H @-) so the token
-            # never appears in the process list (upstream issue #29)
-            response=$(printf 'Authorization: Bearer %s\n' "$token" | curl -s --max-time 5 \
-                -H "Accept: application/json" \
-                -H "Content-Type: application/json" \
-                -H @- \
-                -H "anthropic-beta: oauth-2025-04-20" \
-                -H "User-Agent: claude-code/2.1.34" \
-                "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-            if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
-                usage_data="$response"
-                echo "$response" > "$cache_file"
-            fi
-        fi
-        if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-            usage_data=$(cat "$cache_file" 2>/dev/null)
-        fi
-    fi
+api_five_pct=""
+api_five_reset=""
+api_seven_pct=""
+api_seven_reset=""
+scoped_labels=()
+scoped_pcts=()
+scoped_resets=()
 
-    if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
-        five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
-        five_hour_reset_epoch=$(iso_to_epoch "$five_hour_reset_iso")
-        seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
-        seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
-        seven_day_reset_epoch=$(iso_to_epoch "$seven_day_reset_iso")
-
-        extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-    fi
+if [ -z "$usage_summary" ]; then
+    usage_data=""
 else
-    if [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
-        if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-            extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-        fi
-    fi
+    while IFS=$'\t' read -r rec_kind rec_a rec_b rec_c; do
+        case "$rec_kind" in
+            extra)
+                extra_enabled="$rec_a"
+                ;;
+            window)
+                if [ "$rec_a" = "five" ]; then
+                    api_five_pct="$rec_b"
+                    api_five_reset="$rec_c"
+                else
+                    api_seven_pct="$rec_b"
+                    api_seven_reset="$rec_c"
+                fi
+                ;;
+            scoped)
+                scoped_labels+=("$rec_a")
+                scoped_pcts+=("$rec_b")
+                scoped_resets+=("$rec_c")
+                ;;
+        esac
+    done <<< "$usage_summary"
+fi
+
+# stdin is authoritative when present; the API snapshot is the fallback
+if ! $has_stdin_rates && [ -n "$usage_data" ]; then
+    five_hour_pct="$api_five_pct"
+    seven_day_pct="$api_seven_pct"
+    [ -n "$api_five_reset" ]  && five_hour_reset_epoch=$(iso_to_epoch "$api_five_reset")
+    [ -n "$api_seven_reset" ] && seven_day_reset_epoch=$(iso_to_epoch "$api_seven_reset")
 fi
 
 # ── Rate limit lines ────────────────────────────────────
@@ -343,6 +452,27 @@ if [ -n "$seven_day_pct" ]; then
     rate_lines+="${white}weekly${reset}  ${seven_day_bar} ${seven_day_pct_color}${seven_day_pct_fmt}%${reset}"
     [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
 fi
+
+# ── Model-scoped weekly limits (Fable etc.) ─────────────
+# Labels arrive from jq already lowercased and padded to the width of
+# "current", so every bar starts in the same column
+for scoped_i in "${!scoped_labels[@]}"; do
+    scoped_pct="${scoped_pcts[$scoped_i]}"
+    [ -z "$scoped_pct" ] && continue
+
+    scoped_bar=$(build_bar "$scoped_pct" "$bar_width")
+    scoped_pct_color=$(color_for_pct "$scoped_pct")
+    printf -v scoped_pct_fmt "%3d" "$scoped_pct"
+
+    scoped_reset=""
+    if [ -n "${scoped_resets[$scoped_i]}" ]; then
+        scoped_reset=$(format_epoch_time "$(iso_to_epoch "${scoped_resets[$scoped_i]}")" "datetime")
+    fi
+
+    [ -n "$rate_lines" ] && rate_lines+="\n"
+    rate_lines+="${white}${scoped_labels[$scoped_i]}${reset} ${scoped_bar} ${scoped_pct_color}${scoped_pct_fmt}%${reset}"
+    [ -n "$scoped_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${scoped_reset}${reset}"
+done
 
 if [ "$extra_enabled" = "true" ] && [ -n "$usage_data" ]; then
     extra_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')

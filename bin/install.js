@@ -53,9 +53,15 @@ function install() {
 
   fs.mkdirSync(claudeDir, { recursive: true });
 
+  // Upgrading means running the installer again, so only ever back up the
+  // statusline that was there before the first install
   if (fs.existsSync(targetScript)) {
-    fs.copyFileSync(targetScript, backupScript);
-    console.log(`Backed up existing statusline to ${backupScript}`);
+    if (fs.existsSync(backupScript)) {
+      console.log(`Keeping the existing backup at ${backupScript}`);
+    } else {
+      fs.copyFileSync(targetScript, backupScript);
+      console.log(`Backed up existing statusline to ${backupScript}`);
+    }
   }
 
   // Normalize line endings so the script always runs under bash,

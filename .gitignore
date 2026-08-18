@@ -3,3 +3,4 @@ node_modules/
 cc-statusline-implementation-guide.md
 CLAUDE.md
 image*.png
+*.stackdump

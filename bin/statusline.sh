@@ -1,4 +1,7 @@
 #!/bin/bash
+# cc-statusline - https://github.com/hephaestus-workers/cc-statusline
+# The name above is how the installer recognises its own file, so that an
+# upgrade is never mistaken for a statusline worth backing up.
 set -f
 
 # Replaced with the package version when the installer copies this file. A copy

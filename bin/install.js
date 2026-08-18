@@ -50,6 +50,18 @@ function writeSettings(settings) {
   fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n", "utf8");
 }
 
+// Every release of this fork names itself, and the upstream statusline it was
+// forked from never does, so this tells our own file from a genuinely
+// pre-existing one. Unreadable files count as not ours, which errs towards
+// keeping whatever is there.
+function isOurScript(file) {
+  try {
+    return fs.readFileSync(file, "utf8").includes("cc-statusline");
+  } catch (err) {
+    return false;
+  }
+}
+
 function makeExecutable(file) {
   try {
     fs.chmodSync(file, 0o755);
@@ -85,12 +97,19 @@ function install() {
 
   fs.mkdirSync(claudeDir, { recursive: true });
 
-  // Upgrading means running the installer again, so only ever back up the
-  // statusline that was there before the first install
+  // Upgrading means running the installer again, so the backup must only ever
+  // hold a statusline that is not one of ours. Backing up our own file would
+  // make --uninstall restore an old cc-statusline instead of removing it, and
+  // installers before v1.2.1 did exactly that on the first upgrade of a
+  // machine that had no statusline beforehand - clear those out on the way.
+  if (fs.existsSync(backupScript) && isOurScript(backupScript)) {
+    fs.unlinkSync(backupScript);
+    console.log(`Discarded ${backupScript}: it held cc-statusline itself, not a pre-install statusline`);
+  }
   if (fs.existsSync(targetScript)) {
     if (fs.existsSync(backupScript)) {
       console.log(`Keeping the existing backup at ${backupScript}`);
-    } else {
+    } else if (!isOurScript(targetScript)) {
       fs.copyFileSync(targetScript, backupScript);
       console.log(`Backed up existing statusline to ${backupScript}`);
     }

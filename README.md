@@ -31,7 +31,8 @@ detached from rendering, so it never delays the statusline. The new file is swap
 To turn it off, set `CC_STATUSLINE_NO_SELF_UPDATE=1` in your environment.
 
 Upgrading keeps the backup taken at first install, so `--uninstall` still restores whatever
-statusline you had before cc-statusline.
+statusline you had before cc-statusline. If you had none, no backup is kept and `--uninstall`
+simply removes it.
 
 Two cases still need a manual run:
 
@@ -50,7 +51,9 @@ The `@latest` matters: without it `npx` may reuse an older copy from its own cac
 npx @hephaestus-workers/cc-statusline --uninstall
 ```
 
-If a previous `~/.claude/statusline.sh` existed, it is restored from the backup taken at install time.
+If a statusline of your own was there before cc-statusline, it is restored from the backup taken at
+install time. Otherwise the script is removed and the `statusLine` key is dropped from
+`~/.claude/settings.json`, leaving your other settings untouched.
 
 ## Requirements
 

@@ -405,12 +405,41 @@ version_gt() {
     return 1
 }
 
-if [ -n "$installed_version" ] && [ "$CC_STATUSLINE_NO_SELF_UPDATE" != "1" ] \
-   && command -v npx >/dev/null 2>&1; then
+# Make npx reachable for the update. Claude Code starts this script from a
+# non-login, non-interactive bash, so a Node installed with nvm (which puts
+# itself on PATH from ~/.bashrc) is invisible here and the update would be
+# skipped silently. When npx is not on PATH, use the newest Node under nvm's
+# versions directory. Only called once the daily check is due, so a normal
+# render never pays for it.
+ensure_npx() {
+    command -v npx >/dev/null 2>&1 && return 0
+    local dir best="" best_ver="" ver dirs
+    # The script runs with set -f; expand this one glob explicitly
+    set +f
+    dirs=( "${NVM_DIR:-$HOME/.nvm}"/versions/node/v*/bin )
+    set -f
+    for dir in "${dirs[@]}"; do
+        [ -x "$dir/npx" ] && [ -x "$dir/node" ] || continue
+        ver=${dir%/bin}; ver=${ver##*/v}
+        # Skip pre-releases (v24.0.0-rc.1): version_gt would rank them above
+        # the final release
+        case "$ver" in *-*) continue ;; esac
+        if [ -z "$best" ] || version_gt "$ver" "$best_ver"; then
+            best="$dir"; best_ver="$ver"
+        fi
+    done
+    [ -n "$best" ] || return 1
+    PATH="$best:$PATH"
+    export PATH
+    command -v npx >/dev/null 2>&1
+}
+
+if [ -n "$installed_version" ] && [ "$CC_STATUSLINE_NO_SELF_UPDATE" != "1" ]; then
     update_due=true
     if [ -f "$update_stamp" ]; then
         file_age "$update_stamp" && [ "$_file_age" -lt "$update_interval" ] && update_due=false
     fi
+    $update_due && ! ensure_npx && update_due=false
     if $update_due; then
         if [ -d "$update_lock" ]; then
             file_age "$update_lock" && [ "$_file_age" -ge "$update_lock_max_age" ] && rmdir "$update_lock" 2>/dev/null

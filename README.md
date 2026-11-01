@@ -30,6 +30,13 @@ detached from rendering, so it never delays the statusline. The new file is swap
 
 To turn it off, set `CC_STATUSLINE_NO_SELF_UPDATE=1` in your environment.
 
+Claude Code runs the statusline from a non-login shell, so a Node installed with
+[nvm](https://github.com/nvm-sh/nvm) is not on its `PATH`. From v1.2.3, when `npx` is not found the
+update uses the newest release (not pre-release) under `${NVM_DIR:-~/.nvm}/versions/node/` that has
+both `node` and `npx`. If nvm lives somewhere else, export `NVM_DIR`. Other version managers (fnm,
+volta, nvm-windows) are not searched. Installs older than v1.2.3 on such machines need one manual run
+to pick this up.
+
 Upgrading keeps the backup taken at first install, so `--uninstall` still restores whatever
 statusline you had before cc-statusline. If you had none, no backup is kept and `--uninstall`
 simply removes it.

@@ -90,6 +90,13 @@ Code already supplies rate limits on stdin. The refresh runs in the background a
 renders from the cached snapshot, so it never waits on the network. A failed fetch backs off for five
 minutes rather than retrying on every render.
 
+## Plans without a 5-hour limit
+
+The `current` line (the 5-hour window) is drawn only while your plan has one. Since 2026-11-01 the
+usage endpoint returns `five_hour: null`, and the statusline then simply leaves that line out instead
+of showing `0%`. Each window is read on its own: a window missing from Claude Code's input is filled
+from the usage snapshot, and a cached window whose reset time has already passed is not shown.
+
 ## Differences from upstream
 
 - **Account segment**: shows the currently logged-in Claude account (main feature of this fork).

@@ -1,6 +1,6 @@
 {
   "name": "@hephaestus-workers/cc-statusline",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Claude Code statusline with multi-account display support (fork of kamranahmedse/claude-statusline)",
   "bin": {
     "cc-statusline": "bin/install.js"

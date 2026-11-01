@@ -221,7 +221,10 @@ case "$effort" in
 esac
 
 # ── Rate limits from stdin (primary) ───────────────────
-has_stdin_rates=false
+# Each window may be independently absent (official statusline docs), so read
+# the two windows separately instead of gating seven_day on five_hour.
+has_stdin_five=false
+has_stdin_seven=false
 five_hour_pct=""
 five_hour_reset_epoch=""
 seven_day_pct=""
@@ -229,10 +232,14 @@ seven_day_reset_epoch=""
 
 stdin_five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
 if [ -n "$stdin_five_pct" ]; then
-    has_stdin_rates=true
+    has_stdin_five=true
     five_hour_pct=$(printf "%.0f" "$stdin_five_pct")
     five_hour_reset_epoch=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
-    seven_day_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty' | awk '{printf "%.0f", $1}')
+fi
+stdin_seven_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty')
+if [ -n "$stdin_seven_pct" ]; then
+    has_stdin_seven=true
+    seven_day_pct=$(printf "%.0f" "$stdin_seven_pct")
     seven_day_reset_epoch=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
 fi
 
@@ -302,7 +309,18 @@ refresh_usage_cache() {
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "User-Agent: claude-code/2.1.34" \
         "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-    if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+    # Accept a usage snapshot only if it carries something the renderer below
+    # can show. Since 2026-11-01 the API returns five_hour: null, so five_hour
+    # alone cannot be the success test.
+    if [ -n "$response" ] && echo "$response" | jq -e '
+            type == "object"
+            and (has("error") | not)
+            and ((.five_hour | type) == "object"
+                 or (.seven_day | type) == "object"
+                 or ((.limits | type) == "array"
+                     and any(.limits[]; type == "object" and ((.kind // "") as $k
+                             | $k == "session" or $k == "weekly_all"
+                               or $k == "weekly_scoped"))))' >/dev/null 2>&1; then
         printf '%s' "$response" > "$cache_file"
         rm -f "$fail_file" 2>/dev/null
         return 0
@@ -437,10 +455,10 @@ fi
 usage_summary=""
 if [ -n "$usage_data" ]; then
     usage_summary=$(printf '%s' "$usage_data" | jq -r '
-        def as_pct: (. // 0) | round | tostring;
+        def as_pct: (. // 0) | . + 0.5 | floor | tostring;   # no round in jq 1.5
         def scoped_limits:
             ([ (.limits // [])[]
-               | select(.kind == "weekly_scoped")
+               | select(type == "object" and .kind == "weekly_scoped")
                | select((.scope.model.display_name // "") != "")
                | { name: .scope.model.display_name,
                    pct: (.percent // 0),
@@ -454,9 +472,21 @@ if [ -n "$usage_data" ]; then
                           pct: (.w.utilization // 0),
                           reset: (.w.resets_at // "") })
               end;
+        # A window comes from its own object (five_hour / seven_day) or, when
+        # that is null, from the matching limits[] entry (session / weekly_all).
+        # A window that neither carries is left out, so no bogus 0% line shows.
+        def window($name; $obj; $kind):
+            if ($obj | type) == "object"
+            then [ "window", $name, ($obj.utilization | as_pct), ($obj.resets_at // "") ]
+            else ([ (if (.limits | type) == "array" then .limits[] else empty end)
+                    | select(type == "object" and .kind == $kind) ] | first) as $l
+                 | if $l == null then empty
+                   else [ "window", $name, ($l.percent | as_pct), ($l.resets_at // "") ]
+                   end
+            end;
         [ "extra",  ((.extra_usage.is_enabled // false) | tostring) ],
-        [ "window", "five",  (.five_hour.utilization  | as_pct), (.five_hour.resets_at  // "") ],
-        [ "window", "seven", (.seven_day.utilization  | as_pct), (.seven_day.resets_at // "") ],
+        window("five";  .five_hour; "session"),
+        window("seven"; .seven_day; "weekly_all"),
         ( scoped_limits[]
           | [ "scoped",
               (((.name | ascii_downcase) + "       ")[0:7]),
@@ -503,11 +533,28 @@ else
 fi
 
 # stdin is authoritative when present; the API snapshot is the fallback
-if ! $has_stdin_rates && [ -n "$usage_data" ]; then
-    five_hour_pct="$api_five_pct"
-    seven_day_pct="$api_seven_pct"
-    [ -n "$api_five_reset" ]  && five_hour_reset_epoch=$(iso_to_epoch "$api_five_reset")
-    [ -n "$api_seven_reset" ] && seven_day_reset_epoch=$(iso_to_epoch "$api_seven_reset")
+# (per window: a window missing from stdin is filled from the API on its own)
+# A cached window whose reset time has passed is stale (the fetch may have been
+# failing since), so it is dropped, as Claude Code does for stdin windows.
+if [ -n "$usage_data" ]; then
+    if ! $has_stdin_five && [ -n "$api_five_pct" ]; then
+        five_hour_pct="$api_five_pct"
+        five_hour_reset_epoch=""
+        [ -n "$api_five_reset" ]  && five_hour_reset_epoch=$(iso_to_epoch "$api_five_reset")
+        if [ -n "$five_hour_reset_epoch" ] && [ "$five_hour_reset_epoch" -le "$now_ts" ] 2>/dev/null; then
+            five_hour_pct=""
+            five_hour_reset_epoch=""
+        fi
+    fi
+    if ! $has_stdin_seven && [ -n "$api_seven_pct" ]; then
+        seven_day_pct="$api_seven_pct"
+        seven_day_reset_epoch=""
+        [ -n "$api_seven_reset" ] && seven_day_reset_epoch=$(iso_to_epoch "$api_seven_reset")
+        if [ -n "$seven_day_reset_epoch" ] && [ "$seven_day_reset_epoch" -le "$now_ts" ] 2>/dev/null; then
+            seven_day_pct=""
+            seven_day_reset_epoch=""
+        fi
+    fi
 fi
 
 # ── Rate limit lines ────────────────────────────────────
@@ -548,7 +595,13 @@ for scoped_i in "${!scoped_labels[@]}"; do
 
     scoped_reset=""
     if [ -n "${scoped_resets[$scoped_i]}" ]; then
-        scoped_reset=$(format_epoch_time "$(iso_to_epoch "${scoped_resets[$scoped_i]}")" "datetime")
+        scoped_reset_epoch=$(iso_to_epoch "${scoped_resets[$scoped_i]}")
+        # Same rule as the windows above: a reset time already passed means the
+        # cached value is stale, so the line is dropped
+        if [ -n "$scoped_reset_epoch" ] && [ "$scoped_reset_epoch" -le "$now_ts" ] 2>/dev/null; then
+            continue
+        fi
+        scoped_reset=$(format_epoch_time "$scoped_reset_epoch" "datetime")
     fi
 
     [ -n "$rate_lines" ] && rate_lines+="\n"

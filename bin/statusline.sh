@@ -151,11 +151,12 @@ else
     pct_used=0
 fi
 
-effort="default"
-settings_path="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-if [ -f "$settings_path" ]; then
-    effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
-fi
+# Effort comes from stdin (official statusline docs: effort.level is the level
+# set for the session, including /effort changes and CLAUDE_CODE_EFFORT_LEVEL;
+# the key is absent when the current model does not support effort). When it is
+# absent the segment is hidden instead of guessing from settings.json, which
+# would show a level that is not in effect.
+effort=$(echo "$input" | jq -r '.effort.level // empty')
 
 # ── LINE 1: Model │ Account │ Context % │ Directory (branch) │ Session │ Effort ──
 pct_color=$(color_for_pct "$pct_used")
@@ -212,13 +213,17 @@ if [ -n "$session_duration" ]; then
     line1+="${sep}"
     line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
 fi
-line1+="${sep}"
-case "$effort" in
-    high)   line1+="${magenta}● ${effort}${reset}" ;;
-    medium) line1+="${dim}◑ ${effort}${reset}" ;;
-    low)    line1+="${dim}◔ ${effort}${reset}" ;;
-    *)      line1+="${dim}◑ ${effort}${reset}" ;;
-esac
+if [ -n "$effort" ]; then
+    line1+="${sep}"
+    case "$effort" in
+        max)    line1+="${magenta}✦ ${effort}${reset}" ;;
+        xhigh)  line1+="${magenta}◉ ${effort}${reset}" ;;
+        high)   line1+="${magenta}● ${effort}${reset}" ;;
+        medium) line1+="${dim}◑ ${effort}${reset}" ;;
+        low)    line1+="${dim}◔ ${effort}${reset}" ;;
+        *)      line1+="${dim}◑ ${effort}${reset}" ;;
+    esac
+fi
 
 # ── Rate limits from stdin (primary) ───────────────────
 # Each window may be independently absent (official statusline docs), so read

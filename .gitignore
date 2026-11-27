@@ -7,3 +7,6 @@ image*.png
 
 # Claude Code ローカル作業ディレクトリ（サーバー固有のsession_context等、Git管理外）
 _claude_local/
+
+# Claude Code のプロジェクト用スキル等（社内の機械向けの手順。公開リポジトリに含めない）
+.claude/

@@ -4,3 +4,6 @@ cc-statusline-implementation-guide.md
 CLAUDE.md
 image*.png
 *.stackdump
+
+# Claude Code ローカル作業ディレクトリ（サーバー固有のsession_context等、Git管理外）
+_claude_local/
